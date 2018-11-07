@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<meta http-equiv="content-type" content="text/html; charset=utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+	<link rel="stylesheet" href="//netdna.bootstrapcdn.com/bootstrap/3.0.2/css/bootstrap.min.css">
+	<link rel="stylesheet" href="//netdna.bootstrapcdn.com/bootstrap/3.0.0/css/bootstrap-theme.css">
+	<link rel="stylesheet" href="//netdna.bootstrapcdn.com/bootstrap/3.0.0/css/bootstrap.css">
+
+	<script src="//ajax.googleapis.com/ajax/libs/jquery/1.9.0/jquery.js"></script>
+	<script src="//netdna.bootstrapcdn.com/bootstrap/3.0.0/js/bootstrap.js"></script>
+
+	{% load bootstrap3 %}
+    {% bootstrap_css %}
+	<!-- {{ form.media }} -->
+
+	<link href="{{ STATIC_URL }}lib/css/bootstrap-datetimepicker.css" rel="stylesheet"/>
+	<script src="{{ STATIC_URL }}lib/js/moment.min.js"></script>
+	<script src="{{ STATIC_URL }}lib/js/bootstrap-datetimepicker.min.js"></script>
+
+	<script>
+		var mainMap = window.parent.GeoExt.MapPanel.guess();
+		var click = null;
+		var ignoreEmptyLonLat = false;
+
+		function getInitialSecurityPosition(){
+			if ($('#id_scre_latitude').val()!='' && $('#id_scre_longitude').val()!=''){
+				var lat = parseFloat($('#id_scre_latitude').val());
+				var lon = parseFloat($('#id_scre_longitude').val());
+
+				var lonlat = new window.parent.OpenLayers.LonLat(lon, lat).transform(
+					new window.parent.OpenLayers.Projection("EPSG:4326"), // transform from WGS 1984
+					new window.parent.OpenLayers.Projection("EPSG:900913") // to Spherical Mercator Projection
+				);
+				var feature = new window.parent.OpenLayers.Feature.Vector(new window.parent.OpenLayers.Geometry.Point(lonlat.lon, lonlat.lat));
+
+				mainMap.map.getLayersByName('sec_entry_vector')[0].removeAllFeatures();
+				mainMap.map.getLayersByName('sec_entry_vector')[0].addFeatures([feature]);
+				mainMap.map.panTo(lonlat);
+			}
+		}
+
+		// show settlement boundary on map based on vuid
+		function showsett(vuid) {
+			window.parent.Ext.getCmp('settlemnentSelectionLocator').getStore().data.items.forEach(function(element) {
+				if (element.data.vuid == vuid) {
+					window.parent.Ext.getCmp('settlemnentSelectionLocator').onSelect(element, vuid);
+					return false;
+				};
+			});
+		};
+
+		function getCoordinateActivate(){
+			window.parent.OpenLayers.Control.Click = window.parent.OpenLayers.Class(window.parent.OpenLayers.Control, {
+				defaultHandlerOptions: {
+					'single': true,
+					'double': false,
+					'pixelTolerance': 0,
+					'stopSingle': false,
+					'stopDouble': false
+				},
+
+				initialize: function(options) {
+					this.handlerOptions = window.parent.OpenLayers.Util.extend(
+						{}, this.defaultHandlerOptions
+					);
+					window.parent.OpenLayers.Control.prototype.initialize.apply(
+						this, arguments
+					);
+					this.handler = new window.parent.OpenLayers.Handler.Click(
+						this, {
+							'click': this.trigger
+						}, this.handlerOptions
+					);
+				},
+
+				trigger: function(e) {
+					// A click happened!
+					var lonlat = mainMap.map.getLonLatFromViewPortPx(e.xy);
+					pinlocation(lonlat);
+					getCoordinateDeactivate();
+				}
+
+			});
+
+			click = new window.parent.OpenLayers.Control.Click();
+
+			mainMap.map.addControl(click);
+			click.activate();
+		}
+
+		function pinlocation(lonlat) {
+			var pin = new window.parent.OpenLayers.Geometry.Point(lonlat.lon, lonlat.lat);
+			var feature = new window.parent.OpenLayers.Feature.Vector(pin, {});
+
+			mainMap.map.getLayersByName('sec_entry_vector')[0].removeAllFeatures();
+			mainMap.map.getLayersByName('sec_entry_vector')[0].addFeatures([feature]);
+			mainMap.map.raiseLayer(mainMap.map.getLayersByName('sec_entry_vector')[0],10000);
+
+			lonlat.transform(
+				new window.parent.OpenLayers.Projection("EPSG:900913"),
+				new window.parent.OpenLayers.Projection("EPSG:4326")
+			);
+
+			$('#id_scre_latitude').val(lonlat.lat);
+			$('#id_scre_longitude').val(lonlat.lon);
+
+			// get administrative names from longlat
+			$.ajax({
+				url: '/securitydb/geoadm_from_lonlat/?lon='+lonlat.lon+'&lat='+lonlat.lat ,
+				success: function(data){
+
+					// populate province options
+					$('#id_scre_provid option:selected').prop('selected', false);
+					$("#id_scre_provid").val(data['prov_code']);
+					$("#id_scre_provid option[value='"+data['prov_code']+"']").prop('selected', true);
+
+					// populate district options
+					fill_options($("#id_scre_distid"), data['dist_list'], data['dist_code']);
+
+					// populate setlements options
+					var row = data['sett_list'].find(function (el, i, arr) {if (el[1]==data['vuid']) {return true;}});
+					var pk = row[0];
+					fill_options_pk($("#id_scre_settvuid"), data['sett_list'], pk);
+
+					$('#id_scre_placename').val($('#id_scre_provid option:selected').text()+", "+$('#id_scre_distid option:selected').text()+", "+$('#id_scre_settvuid option:selected').text());
+
+					updatediststore(data['prov_code']);
+					updatesettstore(data['dist_code']);
+
+					// set store event listener to fire only once when store is load
+					window.parent.Ext.getCmp('settlemnentSelectionLocator').getStore().on('load', function(data) {
+						if (this.vuid) showsett(this.vuid);
+					}, {vuid: data['vuid']}, {single: true});
+
+					return false;
+				}
+			})
+		}
+
+		function getCoordinateDeactivate() {
+			click.deactivate();
+			mainMap.map.removeControl(click);
+			click = null;
+		}
+
+		function setViolenceInputState() {
+			if ($('#id_scre_violent_1').is(":checked"))
+			{
+				if ($('#id_scre_unknown').is(":checked"))
+				{
+					// $('#id_scre_arrested').val('');
+					// $('#id_scre_arrested').attr('readonly', true);
+					// $('#id_scre_arrested').attr('color', 'grey');
+					$('#id_scre_injured').val('');
+					$('#id_scre_injured').attr('readonly', true);
+					$('#id_scre_injured').attr('color', 'grey');
+					$('#id_scre_dead').val('');
+					$('#id_scre_dead').attr('readonly', true);
+					$('#id_scre_dead').attr('color', 'grey');
+				}
+				else {
+					$('#id_scre_arrested').attr('readonly', false);
+					$('#id_scre_arrested').attr('color', 'white');
+					$('#id_scre_injured').attr('readonly', false);
+					$('#id_scre_injured').attr('color', 'white');
+					$('#id_scre_dead').attr('readonly', false);
+					$('#id_scre_dead').attr('color', 'white');
+				}
+			}
+			else
+			{
+				// $('#id_scre_arrested').val('');
+				// $('#id_scre_arrested').attr('readonly', true);
+				// $('#id_scre_arrested').attr('color', 'grey');
+				$('#id_scre_injured').val('');
+				$('#id_scre_injured').attr('readonly', true);
+				$('#id_scre_injured').attr('color', 'grey');
+				$('#id_scre_dead').val('');
+				$('#id_scre_dead').attr('readonly', true);
+				$('#id_scre_dead').attr('color', 'grey');
+			};
+		};
+
+		function getvuid(settid) {
+			var arraylonlat = JSON.parse($('#id_scre_settvuid').attr('data-lonlat'));
+			var row = arraylonlat.find(function (el, i, arr) {if (el[0]==settid) {return true;}});
+			if (row) return row[1]; else return false;
+		}
+
+		function initialize_page() {
+			$('#id_scre_username').attr('readonly', true);
+
+			var prov_id = $('#id_scre_provid').val();
+			var dist_code = $('#id_scre_distid').val();
+			var settid = $('#id_scre_settvuid').val();
+
+			if (prov_id=='') mainMap.map.getLayersByName('sec_entry_vector')[0].removeAllFeatures();
+
+			updatediststore(prov_id);
+			updatesettstore(dist_code);
+
+			// set store event listener to fire only once when store is load
+			window.parent.Ext.getCmp('settlemnentSelectionLocator').getStore().on('load', function(data) {
+				if (this.settid) showsett(getvuid(this.settid));
+			}, {settid: settid}, {single: true});
+
+			setViolenceInputState();
+			getInitialSecurityPosition();
+		}
+
+		// update store data of settlemnentSelectionLocator combo box by dist_code value
+		function updatesettstore(dist_code) {
+			var store = window.parent.Ext.getCmp('settlemnentSelectionLocator').getStore();
+			store.load({
+				params:{
+					service: "WFS",
+					version: "1.1.0",
+					request: "GetFeature",
+					typeName: "geonode:afg_ppla",
+					srsName: "EPSG:900913",
+					outputFormat: "json",
+					// maxFeatures: 50,
+					propertyName:'vuid,name_en',
+					CQL_FILTER: "dist_code = "+dist_code
+				}
+			});
+		}
+
+		// update store data of districtSelection combo box by prov_code value
+		function updatediststore(prov_code) {
+			var store = window.parent.Ext.getCmp('districtSelection').getStore();
+			store.load({
+				params:{
+					service: "WFS",
+					version: "1.1.0",
+					request: "GetFeature",
+					typeName: "geonode:afg_admbnda_adm2",
+					srsName: "EPSG:900913",
+					outputFormat: "json",
+					// maxFeatures: 50,
+					propertyName:'dist_code,dist_na_en',
+					CQL_FILTER: "prov_code = "+prov_code
+				}
+			});
+		}
+
+		function fill_options(elm, data, selected_val, extra_cols) {
+			var extra_attr = '';
+			elm.empty();
+			elm.append('<option value="" selected="selected">---------</option>');
+			for(var i = 0; i < Object.keys(data).length; i++){
+				extra_attr = '';
+				if (extra_cols != undefined) {
+					extra_cols.forEach(function (col_name, index, array) {
+						extra_attr += 'data-'+col_name+'="'+data[i][2+index]+'" ';
+					});
+				};
+				elm.append('<option value="' + data[i][0] +'" '+' '+extra_attr+'>' + data[i][1] +'</option>');
+			}
+			elm.prop('disabled', false);
+
+			if (selected_val != undefined) {
+				elm.find('option:selected').prop('selected', false);
+				elm.val(selected_val);
+				elm.find("option[value='"+selected_val+"']").prop('selected', true);
+			}
+
+			return false;
+		}
+
+		function fill_options_pk(elm, data, selected_val, extra_cols) {
+			var extra_attr = '';
+			elm.empty();
+			elm.append('<option value="" selected="selected">---------</option>');
+			for (var index in data) {
+				extra_attr = '';
+				if (extra_cols != undefined) {
+					extra_cols.forEach(function (col_name, col_index, array) {
+						extra_attr += 'data-'+col_name+'="'+data[index][3+col_index]+'" ';
+					});
+				};
+				elm.append('<option value="' + data[index][0] +'" '+' '+extra_attr+'>' + data[index][2] +'</option>');
+			}
+			elm.prop('disabled', false);
+
+			if (selected_val != undefined) {
+				elm.find('option:selected').prop('selected', false);
+				elm.val(selected_val);
+				elm.find("option[value='"+selected_val+"']").prop('selected', true);
+			}
+
+			return false;
+		};
+
+		function reset_layers() {
+			mainMap.map.getLayersByName('Finder Layer')[0].removeAllFeatures();
+			mainMap.map.getLayersByName('Mask Layer')[0].removeAllFeatures();
+			mainMap.map.getLayersByName('sec_entry_vector')[0].removeAllFeatures();
+		};
+
+		function panToLonlat(lonlat4326, zoomlevel) {
+
+			var lonlat = new window.parent.OpenLayers.LonLat(lonlat4326.lon, lonlat4326.lat)
+			.transform(
+				new window.parent.OpenLayers.Projection("EPSG:4326"), // transform from WGS 1984
+				new window.parent.OpenLayers.Projection("EPSG:900913") // to Spherical Mercator Projection
+			);
+
+			var style = {
+		    externalGraphic: "/static/lib/icons/map-marker-icon-red-32px.png",
+		    graphicWidth: 32,
+		    graphicHeight: 32,
+				graphicYOffset: -32,
+		    fillOpacity: 1
+			};
+			var feature = new window.parent.OpenLayers.Feature.Vector(new window.parent.OpenLayers.Geometry.Point(lonlat.lon, lonlat.lat), null, style);
+
+			mainMap.map.getLayersByName('sec_entry_vector')[0].removeAllFeatures();
+			mainMap.map.getLayersByName('sec_entry_vector')[0].addFeatures([feature]);
+
+			if (mainMap.map.zoom == zoomlevel) {
+				mainMap.map.panTo(lonlat);
+			}
+			else {
+				mainMap.map.moveTo(lonlat, zoomlevel);
+			};
+
+			$('#id_scre_latitude').val(lonlat4326.lat);
+			$('#id_scre_longitude').val(lonlat4326.lon);
+		}
+
+	</script>
+
+    <!-- <title>{% block bootstrap3_title %}iMMAP Security System{% endblock %}</title> -->
+	<style>
+		body {font-family: sans-serif; padding:20px}
+		#map {width: 800px; height: 300px}
+		.sticky-notes {
+			position: sticky;
+			top: 20px;
+			z-index: 3;
+			background-color: white;
+		}
+	</style>
+</head>
+<body onload='initialize_page()'>
+	<!-- <header>
+		<div class="page-header">
+			<h3>iMMAP: Security System Entry Form</h3>
+		</div>
+	</header> -->
+	{% if form.errors %}
+		<!-- <div class="alert alert-danger"> -->
+		{{ form.errors }}
+		<!-- </div> -->
+	{% endif %}
+
+	<div id="modalEmptyLonLat" class="modal fade" tabindex="-1" role="dialog">
+	  <div class="modal-dialog" role="document">
+	    <div class="modal-content panel-primary">
+	      <div class="modal-header panel-heading">
+	        <button type="button" class="close" data-dismiss="modal" aria-label="Close"><span aria-hidden="true">&times;</span></button>
+	        <h4 class="modal-title">Confirm</h4>
+	      </div>
+	      <div class="modal-body">
+	        <p>You have not entered settlement, longitude, or latitude. </p>
+					<p>Correct: Yes - Incorrect: Go Back</p>
+	      </div>
+	      <div class="modal-footer">
+					<button type="button" class="btn" id="btnIgnoreEmptyLonLat" data-dismiss="modal">Yes</button>
+	        <button type="button" class="btn btn-primary btn-default" data-dismiss="modal">Go Back</button>
+	      </div>
+	    </div><!-- /.modal-content -->
+	  </div><!-- /.modal-dialog -->
+	</div><!-- /.modal -->
+
+	<form action="" method="post" class="form">
+		{% csrf_token %}
+		{% if form %}
+			{% for field in form.visible_fields %}
+				{% if field.name == 'scre_latitude' %}
+					{% bootstrap_label content='Latitude' label_for='id_scre_latitude' label_class='control-label' %}
+					<button id="setCoord_btn" type="button" class="btn btn-sm btn-primary pull-right" style="margin-top: -9px;">
+						<span class="glyphicon glyphicon-pushpin"></span>
+					</button>
+					{% bootstrap_field field show_label=False %}
+				{% elif field.name == 'scre_longitude' %}
+					{% bootstrap_field field addon_after='<button class="btn btn-default" type="button" title="move pin to long lat value"><span class="glyphicon glyphicon-map-marker"></span></button>' addon_after_class='input-group-btn' %}
+				{% elif field.name == 'scre_notes' %}
+					{% bootstrap_field field form_group_class='form-group sticky-notes' %}
+				{% else %}
+					{% bootstrap_field field %}
+				{% endif %}
+			{% endfor %}
+			<!-- {% buttons %}
+				<button id="setCoord_btn" type="button" class="btn btn-primary pull-right" {{ readonly|yesno:"disabled," }}>
+					{% bootstrap_icon "pushpin" %}
+				</button>
+			{% endbuttons %} -->
+			{% buttons %}
+				<button id="btnSubmit" type="submit" class="btn btn-primary" {{ readonly|yesno:"disabled," }}>
+					Submit
+				</button>
+				<button id="btnCancel" type="button" class="btn btn-primary" onclick="window.location.href = '/securitydb/';">
+					Cancel
+				</button>
+				<button id="btnList" type="button" class="btn btn-primary" onclick="window.location.href = '/securitydb/list';">
+					List
+				</button>
+			{% endbuttons %}
+		{% else %}
+			<p>Sorry no results for your query</p>
+		{% endif %}
+	</form>
+	<script type="text/javascript">
+
+	$(document).ready(function(){
+
+		// fix: convert maxDate from literal string to date Object
+		var maxDate = $("#id_scre_incidentdatestr_picker").data("DateTimePicker").options.maxDate;
+		if (typeof maxDate == 'string') {
+			$("#id_scre_incidentdatestr_picker").data("DateTimePicker").options.maxDate = Date(maxDate);
+		}
+
+		// show pin button on panel header
+		$("#bd_sec_entries_panel .x-tool-pin", parent.document).css('display', 'initial');
+
+		$('#setCoord_btn').click(function() {
+
+			// remove 'Mask Layer' to make pin location easier
+			mainMap.map.getLayersByName('Mask Layer')[0].removeAllFeatures();
+
+			if (!click) getCoordinateActivate();
+		});
+
+		$('#id_scre_provid').change(function() {
+			$('#id_scre_placename').val($('#id_scre_provid option:selected').text());
+			$('#id_scre_distid').prop('disabled', true).empty();
+			$('#id_scre_settvuid').prop('disabled', true).empty();
+
+			prov_id = $(this).val();
+			if (!prov_id) return;
+
+			// populate district dropdown
+			request_url = '/securitydb/' + prov_id + '/get_districts/';
+			$.ajax({
+				url: request_url,
+				success: function(data){
+					fill_options($('#id_scre_distid'), data);
+					return false;
+				}
+			})
+
+			// show selected province on map window
+			var provIdx = new Number($('#id_scre_provid').val());
+			window.parent.Ext.getCmp('provSelection').getStore().data.items.forEach(function(element) {
+				if (element.data.prov_code == provIdx) {
+					window.parent.Ext.getCmp('provSelection').onSelect(element, provIdx)
+					return false;
+				}
+			});
+
+		});
+
+		$('#id_scre_distid').change(function() {
+			$('#id_scre_placename').val(
+				$('#id_scre_provid option:selected').text()+", "+
+				$('#id_scre_distid option:selected').text()
+			);
+			$('#id_scre_settvuid').prop('disabled', true).empty();
+
+			// show selected district on map window
+			var dist_code = new Number($(this).val());
+			if (dist_code == 0) return;
+			window.parent.Ext.getCmp('districtSelection').getStore().data.items.forEach(function(element) {
+				if (element.data.dist_code == dist_code) {
+					window.parent.Ext.getCmp('districtSelection').onSelect(element, dist_code);
+					return false;
+				}
+			});
+
+			// populate settlement dropdown
+			request_url = '/securitydb/' + dist_code + '/get_settlements2/';
+			$.ajax({
+				url: request_url,
+				success: function(data){
+					$('#id_scre_settvuid').attr('data-lonlat', JSON.stringify(data));
+					fill_options_pk($('#id_scre_settvuid'), data);
+					return false;
+				}
+			});
+
+			updatesettstore(dist_code);
+
+		})
+
+		$('#id_scre_settvuid').change(function() {
+			var settelm = this;
+
+			function updateplacename() {
+				$('#id_scre_placename').val(
+					$('#id_scre_provid option:selected').text()+", "+
+					$('#id_scre_distid option:selected').text()+", "+
+					(areaname? areaname+", ":'')+
+					$('#id_scre_settvuid option:selected').text()
+				);
+			}
+
+			function findinarray(array, pk, pkcol, datacol, returnrow) {
+				var row = array.find(function (el, i, arr) {if (el[pkcol]==pk) {return true;}});
+				if (row) {
+					if (returnrow) {
+						return row;
+					}
+					else {
+						return row[datacol];
+					}
+				}
+				else {
+					return false;
+				}
+			}
+
+			// show selected settlement on map window
+			var areaname = '';
+			var pk = $('#id_scre_settvuid').val();
+			var arraylonlat = JSON.parse($('#id_scre_settvuid').attr('data-lonlat'));
+			var row = findinarray(arraylonlat, pk, 0, null, true);
+			if (row) {
+				reset_layers();
+
+				var lonlat = {'lon': parseFloat(row[3]), 'lat': parseFloat(row[4])};
+				var vuid = row[1];
+				if ((vuid) && (vuid != 'null')) {
+					showsett(vuid);
+				}
+				else {
+					// pan to lonlat
+					var zoomlevel = 12; // approximately 5km radius
+					// panToLonlat(lonlat, zoomlevel);
+					panToLonlat(lonlat);
+
+					// call geoadm_from_lonlat to find parent settlement with boundary
+					$.ajax({
+						url: '/securitydb/geoadm_from_lonlat/?lon='+lonlat.lon+'&lat='+lonlat.lat ,
+						success: function(data){
+							areaname = data['name_en'];
+							updateplacename();
+							showsett(data['vuid']);
+
+							// set settlement option
+							var settpk = findinarray(arraylonlat, data['vuid'], 1, 0);
+							$(settelm).find('option:selected').prop('selected', false);
+							$(settelm).val(settpk);
+							$(settelm).find("option[value='"+settpk+"']").prop('selected', true);
+
+							return false;
+						}
+					})
+				}
+				$('#id_scre_latitude').val(lonlat.lat);
+				$('#id_scre_longitude').val(lonlat.lon);
+				updateplacename();
+			}
+		});
+
+		$('#id_scre_longitude ~ .input-group-btn button').click(function() {
+			var lon = parseFloat($('#id_scre_longitude').val());
+			var lat = parseFloat($('#id_scre_latitude').val());
+			var lonlat = new window.parent.OpenLayers.LonLat(lon, lat);
+			lonlat.transform(
+				new window.parent.OpenLayers.Projection("EPSG:4326"),
+				new window.parent.OpenLayers.Projection("EPSG:900913")
+			);
+			pinlocation(lonlat);
+		});
+
+		$('#btnCancel').click(function() {
+			// reset_layers();
+		});
+
+		$('#btnSubmit').click(function() {
+			// console.log('$(#btnSubmit).click');
+			emptyLonLat = ((!$('#id_scre_latitude')[0].value.trim()) || (!$('#id_scre_longitude')[0].value.trim()));
+			if (!ignoreEmptyLonLat && emptyLonLat) {
+				$('#modalEmptyLonLat').modal('show');
+				return false;
+			}
+			// reset_layers();
+		});
+
+		$('#btnIgnoreEmptyLonLat').click(function() {
+			ignoreEmptyLonLat = true;
+			$('#btnSubmit').click();
+		});
+
+		$('#btnList').click(function() {
+			// reset_layers();
+		});
+
+		window.onunload = function (e) {
+			reset_layers();
+			$("#bd_sec_entries_panel .x-tool-pin", parent.document).css('display', 'none');
+		};
+
+		$('#id_scre_unknown').change(function() {
+			setViolenceInputState();
+		});
+
+		$('#id_scre_violent_0').change(function() {
+			setViolenceInputState();
+		});
+
+		$('#id_scre_violent_1').change(function() {
+			setViolenceInputState();
+		});
+	})
+	</script>
+</body>
